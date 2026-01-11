@@ -26,7 +26,7 @@ jobs:
         run: python scripts/sync_leetcode.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_CSRF: ${{ secrets.LEETCODE_CSRF }}
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.repository }}
