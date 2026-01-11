@@ -1,6 +1,5 @@
 import os
 import requests
-import base64
 from github import Github, InputGitTreeElement
 
 # ------------------- CONFIG -------------------
@@ -20,31 +19,29 @@ headers = {
 # ------------------- FETCH SUBMISSIONS -------------------
 def get_submissions():
     query = """
-    query getRecentSubmissions {
-      allAcceptedSubmissions {
-        titleSlug
+    query recentAcSubmissions($limit: Int!) {
+      recentAcSubmissions(limit: $limit) {
+        id
         title
+        titleSlug
         timestamp
         lang
         code
         runtime
         memory
-        question {
-          questionId
-        }
+        questionId
       }
     }
     """
-    resp = requests.post(GRAPHQL_URL, json={"query": query}, headers=headers)
+    variables = {"limit": 50}  # fetch last 50 accepted submissions
+    resp = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers)
     resp.raise_for_status()
     data = resp.json()
     if "errors" in data:
         print("Error fetching submissions:", data["errors"])
         return []
-    submissions = data.get("data", {}).get("allAcceptedSubmissions", [])
-    # flatten questionId to top level
-    for sub in submissions:
-        sub["questionId"] = sub.get("question", {}).get("questionId", "")
+
+    submissions = data.get("data", {}).get("recentAcSubmissions", [])
     return submissions
 
 # ------------------- GITHUB SETUP -------------------
@@ -55,16 +52,14 @@ base_tree = latest_commit.commit.tree
 
 # ------------------- COMMIT FUNCTION -------------------
 def commit_solution(repo, submission, solution_index):
-    # folder name: problemNumber_titleSlug
-    problem_number = submission["questionId"].zfill(4)
+    problem_number = str(submission.get("questionId", "0")).zfill(4)
     folder_name = f"{problem_number}_{submission['titleSlug']}"
 
-    # files: README.md + solution_<n>.py
     readme_path = f"{folder_name}/README.md"
     readme_content = f"# {submission['title']}\nProblem slug: {submission['titleSlug']}\n"
 
     solution_path = f"{folder_name}/solution_{solution_index}.py"
-    solution_content = submission["code"] or "# solution code not found"
+    solution_content = submission.get("code", "# solution code not found")
 
     elements = [
         InputGitTreeElement(readme_path, "100644", "blob", readme_content),
@@ -72,10 +67,9 @@ def commit_solution(repo, submission, solution_index):
     ]
 
     new_tree = repo.create_git_tree(elements, base_tree)
-    commit_message = f"Runtime: {submission['runtime']}, Memory: {submission['memory']}"
+    commit_message = f"Runtime: {submission.get('runtime','N/A')}, Memory: {submission.get('memory','N/A')}"
     new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit.commit])
     repo.get_git_ref(f"heads/{repo.default_branch}").edit(new_commit.sha)
-
     print(f"✅ Committed {solution_path}")
 
 # ------------------- MAIN -------------------
@@ -85,7 +79,6 @@ def main():
         print("No submissions found!")
         return
 
-    # track number of solutions per problem
     solution_count = {}
     for sub in submissions:
         key = sub["titleSlug"]
