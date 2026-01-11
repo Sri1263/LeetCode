@@ -1,7 +1,7 @@
 import os
 import math
 import requests
-from github import Github, InputGitTreeElement
+from github import Github, InputGitTreeElement, Auth
 from datetime import datetime
 
 # ------------------ CONFIG ------------------
