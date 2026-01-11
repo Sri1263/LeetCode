@@ -137,15 +137,20 @@ def commit_solution(repo, submission, problem_content, solution_idx):
         InputGitTreeElement(f"{folder_name}/{solution_file}", "100644", "blob", submission.get("code", "")),
     ]
 
-    # Get latest commit
+    # Get latest commit and base tree
     latest_commit = repo.get_branch(repo.default_branch).commit
+    base_tree = latest_commit.commit.tree  # <--- Pass GitTree object, not SHA
+
     # Create tree
-    new_tree = repo.create_git_tree(elements, latest_commit.commit.tree.sha)
+    new_tree = repo.create_git_tree(elements, base_tree)
+
     # Create commit
-    commit_message = f"{COMMIT_MESSAGE} - Runtime: {submission['runtime']}, Memory: {submission['memory']}"
-    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit.commit])
+    commit_message = f"Runtime: {submission['runtime']}, Memory: {submission['memory']}"
+    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit])
+
     # Update branch
     repo.get_git_ref(f"heads/{repo.default_branch}").edit(new_commit.sha)
+
     log(f"✅ Committed {folder_name}/{solution_file}")
 
 def main():
