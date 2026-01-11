@@ -142,6 +142,8 @@ def get_question_content(title_slug):
 
 # ---------------- COMMIT LOGIC ---------------- #
 def commit_solution(repo, sub, problem_content, solution_index):
+    global latest_commit, base_tree  # <--- must be at top of function
+
     folder_name = f"{pad(sub['question']['questionId'])}_{normalize_name(sub['title'])}"
     readme_path = f"{DEST_FOLDER}{folder_name}/README.md"
     solution_file = f"{DEST_FOLDER}{folder_name}/solution_{solution_index}.{LANG_TO_EXT.get(sub['lang'], 'txt')}"
@@ -161,7 +163,6 @@ def commit_solution(repo, sub, problem_content, solution_index):
     repo.get_git_ref(f"heads/{default_branch}").edit(new_commit.sha)
 
     # Update parent tree/commit for next iteration
-    global latest_commit, base_tree
     latest_commit = new_commit
     base_tree = new_tree
 
