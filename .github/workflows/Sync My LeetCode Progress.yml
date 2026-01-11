@@ -29,4 +29,5 @@ jobs:
           LEETCODE_CSRF: ${{ secrets.LEETCODE_CSRF }}
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.repository }}
+          REPO_NAME: ${{ github.event.repository.name }}
+
