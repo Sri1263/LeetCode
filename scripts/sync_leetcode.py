@@ -1,38 +1,56 @@
 import os
-import requests
 import json
 import time
 import math
-from github import Github, InputGitTreeElement, Auth
+import requests
+from github import Github, InputGitTreeElement
 
-# ===================== CONFIG =====================
+BASE_URL = "https://leetcode.com"
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
 LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 REPO_OWNER = os.environ["REPO_OWNER"]
 REPO_NAME = os.environ["REPO_NAME"]
 
-BASE_URL = "https://leetcode.com"
-COMMIT_MESSAGE = "LeetCode Sync"
+COMMIT_MESSAGE = "Sync LeetCode submission"
 
 LANG_TO_EXTENSION = {
-    "python": "py", "python3": "py", "cpp": "cpp", "java": "java",
-    "c": "c", "csharp": "cs", "javascript": "js", "typescript": "ts",
-    "ruby": "rb", "swift": "swift", "golang": "go", "kotlin": "kt",
-    "rust": "rs", "php": "php", "bash": "sh"
+    "bash": "sh",
+    "c": "c",
+    "cpp": "cpp",
+    "csharp": "cs",
+    "dart": "dart",
+    "elixir": "ex",
+    "erlang": "erl",
+    "golang": "go",
+    "java": "java",
+    "javascript": "js",
+    "kotlin": "kt",
+    "mssql": "sql",
+    "mysql": "sql",
+    "oraclesql": "sql",
+    "php": "php",
+    "python": "py",
+    "python3": "py",
+    "pythondata": "py",
+    "postgresql": "sql",
+    "racket": "rkt",
+    "ruby": "rb",
+    "rust": "rs",
+    "scala": "scala",
+    "swift": "swift",
+    "typescript": "ts",
 }
 
-# ================ HELPER FUNCTIONS =================
-
-def log(msg):
-    print(f"[LeetCode Sync] {msg}")
+def log(message):
+    print(f"[LeetCode Sync] {message}")
 
 def pad(n):
     s = "0000" + str(n)
     return s[-4:]
 
-def normalize_name(name):
-    return name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
+def normalize_name(problemName):
+    return problemName.lower().replace(" ", "_").replace("/", "_")
 
 def graphql_headers():
     return {
@@ -40,7 +58,7 @@ def graphql_headers():
         "origin": BASE_URL,
         "referer": BASE_URL,
         "cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION};",
-        "x-csrftoken": LEETCODE_CSRF
+        "x-csrftoken": LEETCODE_CSRF,
     }
 
 def get_submissions():
@@ -61,7 +79,6 @@ def get_submissions():
                   timestamp
                   title
                   titleSlug
-                  question { questionId }
                 }
               }
             }""",
@@ -83,76 +100,69 @@ def get_submissions():
     log(f"Total accepted submissions found: {len(submissions)}")
     return submissions
 
-def get_problem_content(titleSlug):
+def get_problem_metadata(titleSlug):
     query = json.dumps({
         "query": """query getQuestionDetail($titleSlug: String!) {
-          question(titleSlug: $titleSlug) { content }
+          question(titleSlug: $titleSlug) {
+            questionId
+            content
+          }
         }""",
         "variables": {"titleSlug": titleSlug}
     })
     response = requests.post(f"{BASE_URL}/graphql/", headers=graphql_headers(), data=query)
     data = response.json()
-    if "data" not in data or not data["data"]["question"]:
-        return None
-    return data["data"]["question"]["content"]
+    if "data" in data and data["data"]["question"]:
+        q = data["data"]["question"]
+        return q["questionId"], q["content"]
+    return None, None
 
-# ===================== MAIN SYNC =====================
+def commit_solution(repo, submission, problem_content, solution_idx):
+    lang = submission["lang"]
+    if lang not in LANG_TO_EXTENSION:
+        log(f"Skipping {submission['title']} due to unknown lang {lang}")
+        return
 
-def commit_solution(repo, latest_commit, base_tree, default_branch, sub, problem_content, solution_index):
-    qid = pad(sub["question"]["questionId"])
-    folder_name = f"{qid}_{normalize_name(sub['title'])}"
+    qid, _ = get_problem_metadata(submission["titleSlug"])
+    if not qid:
+        log(f"Skipping {submission['title']} due to missing questionId")
+        return
 
-    # Prepare tree elements
-    readme_path = f"{folder_name}/README.md"
-    solution_path = f"{folder_name}/solution_{solution_index}.py"
+    folder_name = f"{pad(qid)}_{normalize_name(submission['title'])}"
+    solution_file = f"solution_{solution_idx}.{LANG_TO_EXTENSION[lang]}"
+    readme_file = "README.md"
 
     elements = [
-        InputGitTreeElement(readme_path, "100644", "blob", problem_content or "Unable to fetch problem content."),
-        InputGitTreeElement(solution_path, "100644", "blob", sub.get("code", "# solution code unavailable"))
+        InputGitTreeElement(f"{folder_name}/{readme_file}", "100644", "blob", problem_content),
+        InputGitTreeElement(f"{folder_name}/{solution_file}", "100644", "blob", submission.get("code", "")),
     ]
 
+    # Get latest commit
+    latest_commit = repo.get_branch(repo.default_branch).commit
     # Create tree
-    new_tree = repo.create_git_tree(elements, base_tree)
-    
-    # Commit message with runtime/memory only
-    commit_message = f"Runtime: {sub['runtime']}, Memory: {sub['memory']}"
-
+    new_tree = repo.create_git_tree(elements, latest_commit.commit.tree.sha)
     # Create commit
-    commit = repo.create_git_commit(commit_message, new_tree, [latest_commit])
+    commit_message = f"{COMMIT_MESSAGE} - Runtime: {submission['runtime']}, Memory: {submission['memory']}"
+    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit.commit])
     # Update branch
-    ref = repo.get_git_ref(f"heads/{default_branch}")
-    ref.edit(commit.sha)
-    log(f"✅ Committed {solution_path}")
-    return commit, new_tree
+    repo.get_git_ref(f"heads/{repo.default_branch}").edit(new_commit.sha)
+    log(f"✅ Committed {folder_name}/{solution_file}")
 
 def main():
-    # Github auth
-    g = Github(auth=Auth.Token(GITHUB_TOKEN))
+    g = Github(GITHUB_TOKEN)
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
-    default_branch = repo.default_branch
 
-    # Latest commit
-    latest_commit = repo.get_branch(default_branch).commit
-    base_tree = latest_commit.commit.tree
-
-    # Fetch submissions
     submissions = get_submissions()
-    problem_count = {}  # tracks solution index per problem
-
+    # Count solutions per problem
+    solution_count = {}
     for sub in submissions:
-        # skip if question missing
-        if "question" not in sub or not sub["question"]:
+        key = normalize_name(sub["title"])
+        solution_count[key] = solution_count.get(key, 0) + 1
+        problem_id, content = get_problem_metadata(sub["titleSlug"])
+        if not content:
             continue
-        problem_key = sub["question"]["questionId"]
-        if problem_key not in problem_count:
-            problem_count[problem_key] = 1
-        else:
-            problem_count[problem_key] += 1
-
-        problem_content = get_problem_content(sub["titleSlug"])
-        latest_commit, base_tree = commit_solution(
-            repo, latest_commit, base_tree, default_branch, sub, problem_content, problem_count[problem_key]
-        )
+        sub["code"] = ""  # Optional: fetch code if you want to include
+        commit_solution(repo, sub, content, solution_count[key])
 
 if __name__ == "__main__":
     main()
