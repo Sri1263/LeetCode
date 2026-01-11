@@ -1,181 +1,211 @@
 import os
 import math
-import requests
+import time
 from github import Github, InputGitTreeElement
 
-# Env vars from GitHub Action
+# ---------------- CONFIG ----------------
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
 LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 REPO_OWNER = os.environ["REPO_OWNER"]
 REPO_NAME = os.environ["REPO_NAME"]
 
-LANG_EXT = {
-    "python": "py",
-    "python3": "py",
-    "cpp": "cpp",
+COMMIT_HEADER = "Sync LeetCode submission"
+FILTER_DUPLICATE_SECS = 86400  # 1 day
+
+# ---------------- UTILS ----------------
+LANG_TO_EXTENSION = {
+    "bash": "sh",
     "c": "c",
+    "cpp": "cpp",
+    "csharp": "cs",
+    "dart": "dart",
+    "elixir": "ex",
+    "erlang": "erl",
+    "golang": "go",
     "java": "java",
     "javascript": "js",
-    "csharp": "cs",
+    "kotlin": "kt",
+    "mssql": "sql",
+    "mysql": "sql",
+    "oraclesql": "sql",
+    "php": "php",
+    "python": "py",
+    "python3": "py",
+    "pythondata": "py",
+    "postgresql": "sql",
+    "racket": "rkt",
     "ruby": "rb",
+    "rust": "rs",
+    "scala": "scala",
     "swift": "swift",
-    "golang": "go",
     "typescript": "ts",
 }
 
 BASE_URL = "https://leetcode.com"
 
+
 def log(msg):
-    print(f"[LeetCode Sync] {msg}")
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}] {msg}")
 
-def normalize(name):
-    return name.lower().replace(" ", "_").replace("-", "_")
 
-def get_submissions():
-    """Fetch all accepted submissions from LeetCode using GraphQL"""
-    headers = {
-        "Cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION}",
-        "x-csrftoken": LEETCODE_CSRF,
+def pad(n):
+    return str(n).zfill(4)
+
+
+def normalize_name(title):
+    return title.lower().replace(" ", "_").replace("/", "_")
+
+
+def graphql_headers():
+    return {
+        "content-type": "application/json",
         "origin": BASE_URL,
         "referer": BASE_URL,
-        "content-type": "application/json",
+        "cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION};",
+        "x-csrftoken": LEETCODE_CSRF,
     }
 
-    submissions = []
-    offset = 0
-    limit = 20
-    while True:
-        query = {
-            "query": """query submissionList($offset:Int!, $limit:Int!){
-              submissionList(offset:$offset,limit:$limit){
+
+# ---------------- LEETCODE API ----------------
+import requests
+import json
+
+
+def get_submissions(offset=0, limit=20):
+    query = json.dumps({
+        "query": """
+        query submissionList($offset: Int!, $limit: Int!) {
+            submissionList(offset: $offset, limit: $limit) {
                 hasNext
-                submissions{
-                  id
-                  title
-                  titleSlug
-                  lang
-                  runtime
-                  memory
-                  timestamp
-                  statusDisplay
+                submissions {
+                    id
+                    lang
+                    timestamp
+                    statusDisplay
+                    runtime
+                    memory
+                    title
+                    titleSlug
                 }
-              }
-            }""",
-            "variables": {"offset": offset, "limit": limit},
-        }
-        r = requests.post(f"{BASE_URL}/graphql/", json=query, headers=headers)
-        r.raise_for_status()
-        data = r.json()["data"]["submissionList"]
-        for sub in data["submissions"]:
-            if sub["statusDisplay"] == "Accepted":
-                submissions.append(sub)
-        if not data["hasNext"]:
-            break
-        offset += limit
-    log(f"Total accepted submissions found: {len(submissions)}")
-    return submissions
-
-def get_submission_code(sub_id):
-    headers = {
-        "Cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION}",
-        "x-csrftoken": LEETCODE_CSRF,
-        "origin": BASE_URL,
-        "referer": BASE_URL,
-        "content-type": "application/json",
-    }
-    query = {
-        "query": """query submissionDetails($id:Int!){
-          submissionDetails(submissionId:$id){
-            code
-          }
+            }
         }""",
-        "variables": {"id": sub_id},
-    }
-    r = requests.post(f"{BASE_URL}/graphql/", json=query, headers=headers)
+        "variables": {"offset": offset, "limit": limit}
+    })
+    r = requests.post(f"{BASE_URL}/graphql/", data=query, headers=graphql_headers())
     r.raise_for_status()
-    return r.json()["data"]["submissionDetails"]["code"]
+    return r.json()
 
-def get_problem_content(slug):
-    headers = {
-        "Cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION}",
-        "x-csrftoken": LEETCODE_CSRF,
-        "origin": BASE_URL,
-        "referer": BASE_URL,
-        "content-type": "application/json",
-    }
-    query = {
-        "query": """query getQuestionDetail($slug:String!){
-          question(titleSlug:$slug){
-            content
-          }
+
+def get_submission_detail(submission_id):
+    query = json.dumps({
+        "query": """
+        query submissionDetails($submissionId: Int!) {
+            submissionDetails(submissionId: $submissionId) {
+                code
+                runtimePercentile
+                memoryPercentile
+                question { questionId }
+            }
         }""",
-        "variables": {"slug": slug},
-    }
-    r = requests.post(f"{BASE_URL}/graphql/", json=query, headers=headers)
+        "variables": {"submissionId": submission_id}
+    })
+    r = requests.post(f"{BASE_URL}/graphql/", data=query, headers=graphql_headers())
+    r.raise_for_status()
+    return r.json()["data"]["submissionDetails"]
+
+
+def get_question_content(title_slug):
+    query = json.dumps({
+        "query": """
+        query getQuestionDetail($titleSlug: String!) {
+            question(titleSlug: $titleSlug) { content }
+        }""",
+        "variables": {"titleSlug": title_slug}
+    })
+    r = requests.post(f"{BASE_URL}/graphql/", data=query, headers=graphql_headers())
     r.raise_for_status()
     return r.json()["data"]["question"]["content"]
 
+
+# ---------------- GITHUB ----------------
+def commit_solution(repo, submission, question_content, solution_index):
+    qid = submission["qid"]
+    folder_name = f"{pad(qid)} {normalize_name(submission['title'])}"
+
+    # Files
+    readme_path = f"{folder_name}/README.md"
+    solution_file = f"{folder_name}/solution_{solution_index}.py"
+
+    elements = [
+        InputGitTreeElement(readme_path, "100644", "blob", question_content),
+        InputGitTreeElement(solution_file, "100644", "blob", submission["code"] + "\n")
+    ]
+
+    parent = repo.get_commits()[0].commit
+    base_tree_sha = repo.get_commits()[0].commit.tree.sha
+
+    # Commit message only has runtime/memory
+    runtime = submission.get("runtime", "N/A")
+    memory = submission.get("memory", "N/A")
+    runtime_perc = submission.get("runtimePerc")
+    memory_perc = submission.get("memoryPerc")
+
+    if runtime_perc:
+        msg = f"{COMMIT_HEADER} - Runtime: {runtime} ({runtime_perc}), Memory: {memory} ({memory_perc})"
+    else:
+        msg = f"{COMMIT_HEADER} - Runtime: {runtime}, Memory: {memory}"
+
+    new_tree = repo.create_git_tree(elements, base_tree_sha)
+    commit = repo.create_git_commit(msg, new_tree, [parent])
+    master_ref = repo.get_git_ref("heads/main")
+    master_ref.edit(commit.sha)
+    log(f"✅ Committed {folder_name}/solution_{solution_index}")
+
+
+# ---------------- MAIN ----------------
 def main():
     g = Github(GITHUB_TOKEN)
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
-    commits = list(repo.get_commits())
-    latest_commit_sha = commits[0].sha
-    base_tree = repo.get_git_tree(latest_commit_sha)
 
-    submissions = get_submissions()
-    elements = []
+    log("Fetching submissions...")
+    submissions = []
+    offset = 0
+    submissions_dict = {}
+    while True:
+        data = get_submissions(offset)
+        for s in data["data"]["submissionList"]["submissions"]:
+            if s["statusDisplay"] != "Accepted":
+                continue
+            title = s["title"]
+            lang = s["lang"]
+            ts = int(s["timestamp"])
+            key = f"{title}_{lang}"
+            # Filter duplicates within 1 day
+            if key in submissions_dict and ts - submissions_dict[key] < FILTER_DUPLICATE_SECS:
+                continue
+            submissions_dict[key] = ts
+            submissions.append(s)
+        if not data["data"]["submissionList"]["hasNext"]:
+            break
+        offset += 20
 
-    # Track solution counts per problem
+    log(f"Total accepted submissions found: {len(submissions)}")
+
     solution_count = {}
+    for sub in reversed(submissions):  # oldest first
+        details = get_submission_detail(sub["id"])
+        sub["code"] = details["code"]
+        sub["runtimePerc"] = details.get("runtimePercentile")
+        sub["memoryPerc"] = details.get("memoryPercentile")
+        sub["qid"] = details["question"]["questionId"]
+        question_content = get_question_content(sub["titleSlug"])
 
-    for sub in submissions:
-        title = normalize(sub["title"])
-        if title not in solution_count:
-            solution_count[title] = 1
-        else:
-            solution_count[title] += 1
+        # Count multiple solutions per problem
+        key = sub["title"]
+        solution_count[key] = solution_count.get(key, 0) + 1
+        commit_solution(repo, sub, question_content, solution_count[key])
 
-        sol_num = solution_count[title]
-        folder = f"{title}"
-        readme_path = f"{folder}/README.md"
-        solution_path = f"{folder}/solution_{sol_num}.{LANG_EXT.get(sub['lang'].lower(), 'txt')}"
-
-        # Fetch problem description & submission code
-        try:
-            problem_content = get_problem_content(sub["titleSlug"])
-            code = get_submission_code(sub["id"])
-        except Exception as e:
-            log(f"Skipping {sub['title']} due to error: {e}")
-            continue
-
-        commit_msg = f"{sub['title']} - Runtime: {sub['runtime']}, Memory: {sub['memory']}"
-        
-        elements.append(InputGitTreeElement(readme_path, "100644", "blob", problem_content))
-        elements.append(InputGitTreeElement(solution_path, "100644", "blob", code))
-
-        # Create commit
-        # Get latest commit and tree from default branch
-        default_branch = repo.get_branch(repo.default_branch)
-        latest_commit = repo.get_git_commit(default_branch.commit.sha)
-        base_tree_sha = latest_commit.tree.sha
-        
-        # Get the latest commit on the default branch
-        default_branch = repo.get_branch(repo.default_branch)
-        latest_commit = repo.get_git_commit(default_branch.commit.sha)
-        
-        # Get the base tree as a proper GitTree object
-        base_tree = repo.get_git_tree(latest_commit.tree.sha)
-        
-        # Now create a new tree based on the latest tree
-        tree = repo.create_git_tree(elements, base_tree)
-        parent = repo.get_git_commit(latest_commit_sha)
-        commit = repo.create_git_commit(commit_msg, tree, [parent])
-        repo.get_git_ref(f"heads/{repo.default_branch}").edit(commit.sha)
-        latest_commit_sha = commit.sha
-        elements.clear()  # Clear for next submission
-
-        log(f"✅ Committed {folder}/solution_{sol_num}")
 
 if __name__ == "__main__":
     main()
