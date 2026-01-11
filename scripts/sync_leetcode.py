@@ -1,19 +1,15 @@
 import os
-import base64
-from github import Github
-import requests
 import time
+import requests
+from github import Github, InputGitTreeElement
 
-# LeetCode + GitHub tokens from environment (set in GitHub Secrets)
 LEETCODE_SESSION = os.environ.get("LEETCODE_SESSION")
 LEETCODE_CSRF = os.environ.get("LEETCODE_CSRF_TOKEN")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# Get repo info from workflow context
-REPO_FULL = os.environ.get("GITHUB_REPOSITORY")  # "owner/repo"
+REPO_FULL = os.environ.get("GITHUB_REPOSITORY")  # owner/repo
 REPO_OWNER, REPO_NAME = REPO_FULL.split("/")
 
-# LeetCode GraphQL endpoints
 GRAPHQL_URL = "https://leetcode.com/graphql/"
 
 HEADERS = {
@@ -86,7 +82,7 @@ def fetch_submission_code(submission_id):
 
 def main():
     g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")  # ✅ fixed 404
+    repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
     offset = 0
     all_submissions = []
@@ -98,51 +94,49 @@ def main():
         offset += 20
         time.sleep(1)
 
-    # Keep only Accepted submissions
     accepted = [s for s in all_submissions if s["statusDisplay"] == "Accepted"]
 
-    # Track multiple solutions per problem
     solution_count = {}
 
     for sub in sorted(accepted, key=lambda x: x["timestamp"]):
         problem = normalize_name(sub["title"])
-        if problem not in solution_count:
-            solution_count[problem] = 1
-        else:
-            solution_count[problem] += 1
-
+        solution_count[problem] = solution_count.get(problem, 0) + 1
         code, runtimePerc, memoryPerc = fetch_submission_code(sub["id"])
+
         folder_path = problem
         file_name = f"solution_{solution_count[problem]}.{LANG_TO_EXT.get(sub['lang'], 'txt')}"
 
-        # Create folder in Git tree
+        # Build tree elements
         elements = []
 
-        # README.md with problem name (could be extended to fetch full problem description)
+        # README.md
         readme_path = f"{folder_path}/README.md"
-        elements.append({
-            "path": readme_path,
-            "mode": "100644",
-            "type": "blob",
-            "content": f"# {sub['title']}\nProblem slug: {sub['titleSlug']}"
-        })
+        elements.append(
+            InputGitTreeElement(
+                path=readme_path,
+                mode="100644",
+                type="blob",
+                content=f"# {sub['title']}\nProblem slug: {sub['titleSlug']}"
+            )
+        )
 
         # Solution file
         solution_path = f"{folder_path}/{file_name}"
-        elements.append({
-            "path": solution_path,
-            "mode": "100644",
-            "type": "blob",
-            "content": code
-        })
+        elements.append(
+            InputGitTreeElement(
+                path=solution_path,
+                mode="100644",
+                type="blob",
+                content=code
+            )
+        )
 
-        # Get latest tree and commit
+        # Create tree and commit
         base_tree = repo.get_branch(repo.default_branch).commit.commit.tree
         new_tree = repo.create_git_tree(elements, base_tree)
         commit_message = f"Time: {sub['runtime']} ({runtimePerc}%), Space: {sub['memory']} ({memoryPerc}%)"
         parent = repo.get_branch(repo.default_branch).commit.sha
         commit = repo.create_git_commit(commit_message, new_tree, [parent])
-        # Update branch ref
         repo.get_git_ref(f"heads/{repo.default_branch}").edit(commit.sha)
 
         print(f"Committed {file_name} for {sub['title']}")
