@@ -1,33 +1,28 @@
 import os
 import math
-import time
 import requests
-from github import Github, InputGitTreeElement, Auth
+from github import Github, InputGitTreeElement
+from datetime import datetime
 
-# ---------------- CONFIG ----------------
+# ------------------ CONFIG ------------------
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
+LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 REPO_OWNER = os.environ["REPO_OWNER"]
 REPO_NAME = os.environ["REPO_NAME"]
-BASE_URL = "https://leetcode.com"
-# ---------------------------------------
 
+# Constants
+BASE_URL = "https://leetcode.com"
+COMMIT_MESSAGE = "Sync LeetCode submission"
+
+# Map LeetCode languages to file extensions
 LANG_TO_EXTENSION = {
-    "python": "py",
-    "python3": "py",
-    "cpp": "cpp",
-    "java": "java",
-    "javascript": "js",
-    "c": "c",
-    "csharp": "cs",
-    "golang": "go",
-    "kotlin": "kt",
-    "swift": "swift",
-    "ruby": "rb",
-    "php": "php",
+    "python": "py", "python3": "py", "cpp": "cpp", "java": "java",
+    "javascript": "js", "c": "c", "csharp": "cs", "golang": "go",
+    "ruby": "rb", "swift": "swift", "kotlin": "kt"
 }
 
+# ------------------ UTILS ------------------
 def log(msg):
     print(f"[LeetCode Sync] {msg}")
 
@@ -38,112 +33,129 @@ def pad(n):
 def normalize_name(name):
     return name.lower().replace(" ", "_").replace("-", "_")
 
-def graphql_headers():
+def graphql_headers(session, csrf):
     return {
         "content-type": "application/json",
         "origin": BASE_URL,
         "referer": BASE_URL,
-        "cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION};",
-        "x-csrftoken": LEETCODE_CSRF,
+        "cookie": f"csrftoken={csrf}; LEETCODE_SESSION={session};",
+        "x-csrftoken": csrf,
     }
 
-def fetch_submissions():
+# ------------------ GET SUBMISSIONS ------------------
+def get_submissions():
+    log("Fetching submissions...")
+    url = BASE_URL + "/graphql/"
+    query = """
+    query ($offset: Int!, $limit: Int!) {
+      submissionList(offset: $offset, limit: $limit) {
+        hasNext
+        submissions {
+          id
+          title
+          titleSlug
+          lang
+          statusDisplay
+          runtime
+          memory
+          timestamp
+          question {
+            questionId
+          }
+        }
+      }
+    }
+    """
     offset = 0
     submissions = []
     while True:
-        graphql = {
-            "query": """query ($offset: Int!, $limit: Int!) {
-                submissionList(offset: $offset, limit: $limit) {
-                    hasNext
-                    submissions {
-                        id
-                        lang
-                        timestamp
-                        statusDisplay
-                        runtime
-                        memory
-                        title
-                        titleSlug
-                    }
-                }
-            }""",
-            "variables": {"offset": offset, "limit": 20},
-        }
-        r = requests.post(
-            BASE_URL + "/graphql/",
-            headers=graphql_headers(),
-            json=graphql
-        ).json()
-
-        subs = r["data"]["submissionList"]["submissions"]
-        for sub in subs:
+        resp = requests.post(url, headers=graphql_headers(LEETCODE_SESSION, LEETCODE_CSRF),
+                             json={"query": query, "variables": {"offset": offset, "limit": 20}})
+        data = resp.json()
+        for sub in data["data"]["submissionList"]["submissions"]:
             if sub["statusDisplay"] == "Accepted":
                 submissions.append(sub)
-
-        if not r["data"]["submissionList"]["hasNext"]:
+        if not data["data"]["submissionList"]["hasNext"]:
             break
         offset += 20
-        time.sleep(1)
     log(f"Total accepted submissions found: {len(submissions)}")
     return submissions
 
-def fetch_problem_content(title_slug):
-    graphql = {
-        "query": """query getQuestionDetail($titleSlug: String!) {
-            question(titleSlug: $titleSlug) {
-                questionId
-                content
-            }
-        }""",
-        "variables": {"titleSlug": title_slug},
+# ------------------ GET PROBLEM CONTENT ------------------
+def get_problem_content(title_slug):
+    url = BASE_URL + "/graphql/"
+    query = """
+    query getQuestionDetail($titleSlug: String!) {
+      question(titleSlug: $titleSlug) {
+        content
+        questionId
+      }
     }
-    r = requests.post(BASE_URL + "/graphql/", headers=graphql_headers(), json=graphql).json()
-    return r["data"]["question"]["content"], r["data"]["question"]["questionId"]
+    """
+    resp = requests.post(url, headers=graphql_headers(LEETCODE_SESSION, LEETCODE_CSRF),
+                         json={"query": query, "variables": {"titleSlug": title_slug}})
+    try:
+        return resp.json()["data"]["question"]["content"], resp.json()["data"]["question"]["questionId"]
+    except:
+        log(f"Problem locked or missing: {title_slug}")
+        return None, None
 
+# ------------------ COMMIT FUNCTION ------------------
 def commit_solution(repo, submission, problem_content, solution_index):
-    title_slug = submission["titleSlug"]
-    lang = submission["lang"]
-    ext = LANG_TO_EXTENSION.get(lang, "txt")
+    lang_ext = LANG_TO_EXTENSION.get(submission["lang"])
+    if not lang_ext:
+        log(f"Skipping {submission['title']} due to unsupported language: {submission['lang']}")
+        return
 
-    problem_content = problem_content or "Unable to fetch problem description."
-    folder_name = f"{pad(submission['id'])}_{normalize_name(submission['title'])}"
+    # Folder with 4-digit question ID + normalized name
+    qid = pad(submission["question"]["questionId"])
+    folder_name = f"{qid}_{normalize_name(submission['title'])}"
 
-    # Files
+    # Files to commit
     elements = [
-        InputGitTreeElement(f"{folder_name}/README.md", "100644", "blob", problem_content),
-        InputGitTreeElement(f"{folder_name}/solution_{solution_index}.{ext}", "100644", "blob", submission.get("code", "")),
+        InputGitTreeElement(
+            path=f"{folder_name}/README.md",
+            mode="100644",
+            type="blob",
+            content=problem_content or "Unable to fetch problem content."
+        ),
+        InputGitTreeElement(
+            path=f"{folder_name}/solution_{solution_index}.{lang_ext}",
+            mode="100644",
+            type="blob",
+            content=submission.get("code", "") + "\n"
+        )
     ]
 
-    # Get latest commit & tree
-    default_branch = repo.default_branch
-    latest_commit = repo.get_branch(default_branch).commit
-    base_tree = repo.get_git_tree(latest_commit.commit.tree.sha)
+    # Get latest commit
+    ref = repo.get_git_ref(f"heads/{repo.default_branch}")
+    latest_commit = repo.get_git_commit(ref.object.sha)
+    base_tree = latest_commit.tree
 
-    # Create new tree & commit
+    # Create new tree and commit
     new_tree = repo.create_git_tree(elements, base_tree)
-    commit_msg = f"Runtime: {submission['runtime']}, Memory: {submission['memory']}"
-    new_commit = repo.create_git_commit(commit_msg, new_tree, [latest_commit.commit])
+    commit_message = f"{COMMIT_MESSAGE} - Runtime: {submission['runtime']}, Memory: {submission['memory']}"
+    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit])
+    ref.edit(new_commit.sha, force=True)
+    log(f"✅ Committed {folder_name}/solution_{solution_index}.{lang_ext}")
 
-    # Update branch to point to new commit
-    repo.get_git_ref(f"heads/{default_branch}").edit(new_commit.sha)
-    log(f"✅ Committed {folder_name}/solution_{solution_index}.{ext}")
-
+# ------------------ MAIN ------------------
 def main():
-    log("Fetching submissions...")
-    submissions = fetch_submissions()
-
-    g = Github(auth=Auth.Token(GITHUB_TOKEN))
+    g = Github(auth=GITHUB_TOKEN)  # fixes deprecation warning
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
-    # Track solution index per problem
+    submissions = get_submissions()
+
+    # Count solutions per problem
     solution_count = {}
-
     for sub in submissions:
-        key = normalize_name(sub["title"])
+        key = sub["titleSlug"]
         solution_count[key] = solution_count.get(key, 0) + 1
-
-        problem_content, question_id = fetch_problem_content(sub["titleSlug"])
-        sub["code"] = sub.get("code", "# Solution code not fetched yet")  # Add code field if missing
+        problem_content, question_id = get_problem_content(sub["titleSlug"])
+        if not problem_content:
+            continue
+        sub["code"] = sub.get("code", "")  # fallback
+        sub["question"]["questionId"] = question_id
         commit_solution(repo, sub, problem_content, solution_count[key])
 
 if __name__ == "__main__":
