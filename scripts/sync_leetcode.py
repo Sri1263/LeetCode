@@ -133,7 +133,6 @@ def commit_solution(repo, submission, question_content, solution_index):
     qid = submission["qid"]
     folder_name = f"{pad(qid)} {normalize_name(submission['title'])}"
 
-    # Files
     readme_path = f"{folder_name}/README.md"
     solution_file = f"{folder_name}/solution_{solution_index}.py"
 
@@ -142,10 +141,10 @@ def commit_solution(repo, submission, question_content, solution_index):
         InputGitTreeElement(solution_file, "100644", "blob", submission["code"] + "\n")
     ]
 
-    parent = repo.get_commits()[0].commit
-    base_tree_sha = repo.get_commits()[0].commit.tree.sha
+    parent = repo.get_commits()[0]
+    # Fetch GitTree object instead of passing SHA
+    base_tree = repo.get_git_tree(parent.commit.tree.sha)
 
-    # Commit message only has runtime/memory
     runtime = submission.get("runtime", "N/A")
     memory = submission.get("memory", "N/A")
     runtime_perc = submission.get("runtimePerc")
@@ -156,12 +155,11 @@ def commit_solution(repo, submission, question_content, solution_index):
     else:
         msg = f"{COMMIT_HEADER} - Runtime: {runtime}, Memory: {memory}"
 
-    new_tree = repo.create_git_tree(elements, base_tree_sha)
-    commit = repo.create_git_commit(msg, new_tree, [parent])
+    new_tree = repo.create_git_tree(elements, base_tree)  # <- pass GitTree object
+    commit = repo.create_git_commit(msg, new_tree, [parent.commit])
     master_ref = repo.get_git_ref("heads/main")
     master_ref.edit(commit.sha)
     log(f"✅ Committed {folder_name}/solution_{solution_index}")
-
 
 # ---------------- MAIN ----------------
 def main():
