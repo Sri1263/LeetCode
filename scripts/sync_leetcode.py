@@ -160,7 +160,15 @@ def main():
         latest_commit = repo.get_git_commit(default_branch.commit.sha)
         base_tree_sha = latest_commit.tree.sha
         
-        tree = repo.create_git_tree(elements, base_tree_sha)
+        # Get the latest commit on the default branch
+        default_branch = repo.get_branch(repo.default_branch)
+        latest_commit = repo.get_git_commit(default_branch.commit.sha)
+        
+        # Get the base tree as a proper GitTree object
+        base_tree = repo.get_git_tree(latest_commit.tree.sha)
+        
+        # Now create a new tree based on the latest tree
+        tree = repo.create_git_tree(elements, base_tree)
         parent = repo.get_git_commit(latest_commit_sha)
         commit = repo.create_git_commit(commit_msg, tree, [parent])
         repo.get_git_ref(f"heads/{repo.default_branch}").edit(commit.sha)
