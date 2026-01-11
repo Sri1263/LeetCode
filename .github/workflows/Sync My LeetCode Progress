@@ -1,0 +1,34 @@
+name: Sync My LeetCode Progress
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * *"  # 4 AM IST
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests PyGithub
+
+      - name: Run LeetCode sync
+        run: python scripts/sync_leetcode.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          FILTER_DUPLICATE_SECS: 86400
+          GITHUB_REPO: ${{ github.repository }}
