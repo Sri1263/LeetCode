@@ -1,172 +1,173 @@
 import os
-import math
+import json
 import requests
-from github import Github, Auth, InputGitTreeElement
-from datetime import datetime
+import base64
+from github import Github, InputGitTreeElement
+import math
 
-# ---------------- CONFIG ----------------
+# ===== CONFIG =====
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-REPO_OWNER = os.environ["REPO_OWNER"]
-REPO_NAME = os.environ["REPO_NAME"]
 LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
+REPO_OWNER = os.environ["REPO_OWNER"]
+REPO_NAME = os.environ["REPO_NAME"]
 FILTER_DUPLICATE_SECS = 86400  # 1 day
 
-# ---------------------------------------
-
-BASE_URL = "https://leetcode.com"
-HEADERS = {
-    "cookie": f"LEETCODE_SESSION={LEETCODE_SESSION}; csrftoken={LEETCODE_CSRF};",
-    "x-csrftoken": LEETCODE_CSRF,
-    "origin": BASE_URL,
-    "referer": BASE_URL,
-    "content-type": "application/json",
-}
-
-LANG_EXT = {
-    "python": "py",
-    "python3": "py",
-    "cpp": "cpp",
-    "java": "java",
-    "c": "c",
-    "csharp": "cs",
-    "javascript": "js",
-    "typescript": "ts",
-    "ruby": "rb",
-    "go": "go",
-    "rust": "rs",
-    "swift": "swift",
-}
+# ===== HELPERS =====
+def graphql_headers():
+    return {
+        "content-type": "application/json",
+        "origin": "https://leetcode.com",
+        "referer": "https://leetcode.com",
+        "cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION};",
+        "x-csrftoken": LEETCODE_CSRF,
+    }
 
 def normalize_name(name):
-    return name.lower().replace(" ", "_").replace("-", "_")
+    return name.lower().replace(" ", "_").replace("/", "_")
 
-def fetch_submissions():
-    submissions = []
-    offset = 0
-    while True:
-        data = {
-            "query": """
-            query ($offset: Int!, $limit: Int!) {
-              submissionList(offset: $offset, limit: $limit) {
-                hasNext
-                submissions {
-                  id
-                  title
-                  titleSlug
-                  statusDisplay
-                  lang
-                  runtime
-                  memory
-                  timestamp
-                }
-              }
+LANG_EXT = {
+    "python3": "py", "python": "py", "cpp": "cpp", "java": "java",
+    "c": "c", "csharp": "cs", "javascript": "js", "go": "go",
+    "ruby": "rb", "rust": "rs", "swift": "swift", "kotlin": "kt",
+}
+
+def fetch_submissions(offset=0):
+    query = {
+        "query": """
+        query ($offset: Int!, $limit: Int!) {
+          submissionList(offset: $offset, limit: $limit) {
+            hasNext
+            submissions {
+              id
+              statusDisplay
+              title
+              lang
+              runtime
+              memory
+              timestamp
+              titleSlug
             }
-            """,
-            "variables": {"offset": offset, "limit": 20},
+          }
         }
-        r = requests.post(f"{BASE_URL}/graphql/", headers=HEADERS, json=data)
-        r.raise_for_status()
-        resp = r.json()
-        subs = resp["data"]["submissionList"]["submissions"]
-        submissions.extend([s for s in subs if s["statusDisplay"] == "Accepted"])
-        if not resp["data"]["submissionList"]["hasNext"]:
-            break
-        offset += 20
-    return submissions
+        """,
+        "variables": {"offset": offset, "limit": 20},
+    }
+    resp = requests.post("https://leetcode.com/graphql/", headers=graphql_headers(), json=query)
+    resp.raise_for_status()
+    return resp.json()["data"]["submissionList"]
 
-def fetch_code(sub_id):
-    data = {
+def fetch_submission_code(sub_id):
+    query = {
         "query": """
         query submissionDetails($submissionId: Int!) {
           submissionDetails(submissionId: $submissionId) {
             code
+            runtimePercentile
+            memoryPercentile
           }
-        }""",
+        }
+        """,
         "variables": {"submissionId": sub_id},
     }
-    r = requests.post(f"{BASE_URL}/graphql/", headers=HEADERS, json=data)
-    r.raise_for_status()
-    return r.json()["data"]["submissionDetails"]["code"]
+    resp = requests.post("https://leetcode.com/graphql/", headers=graphql_headers(), json=query)
+    resp.raise_for_status()
+    data = resp.json()["data"]["submissionDetails"]
+    return data["code"], data["runtimePercentile"], data["memoryPercentile"]
 
-def fetch_question(titleSlug):
-    data = {
+def fetch_question_content(slug):
+    query = {
         "query": """
         query getQuestionDetail($titleSlug: String!) {
           question(titleSlug: $titleSlug) {
             content
           }
-        }""",
-        "variables": {"titleSlug": titleSlug},
+        }
+        """,
+        "variables": {"titleSlug": slug},
     }
-    r = requests.post(f"{BASE_URL}/graphql/", headers=HEADERS, json=data)
-    r.raise_for_status()
-    return r.json()["data"]["question"]["content"]
+    resp = requests.post("https://leetcode.com/graphql/", headers=graphql_headers(), json=query)
+    resp.raise_for_status()
+    return resp.json()["data"]["question"]["content"]
 
+# ===== MAIN SYNC =====
 def main():
-    g = Github(auth=Auth.Token(GITHUB_TOKEN))
+    g = Github(GITHUB_TOKEN)
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
+    default_branch = repo.default_branch
+    base_tree_sha = repo.get_branch(default_branch).commit.commit.tree.sha
+    parent_commit = repo.get_branch(default_branch).commit.sha
 
-    # get last synced timestamp from commits
-    commits = repo.get_commits()
-    last_ts = 0
-    for c in commits:
-        msg = c.commit.message
-        if "Time:" in msg and "Space:" in msg:
-            last_ts = max(last_ts, int(c.commit.committer.date.timestamp()))
+    # Keep track of previously committed submissions
+    committed = {}
+    try:
+        content = repo.get_contents("")  # root
+        for file in content:
+            if file.type == "dir":
+                committed[file.name] = set()
+    except:
+        pass
+
+    offset = 0
+    submissions_all = []
+    while True:
+        subs = fetch_submissions(offset)
+        for sub in subs["submissions"]:
+            if sub["statusDisplay"] != "Accepted":
+                continue
+            key = normalize_name(sub["title"]) + "_" + sub["lang"]
+            ts = sub["timestamp"]
+            # Skip if already committed and recent
+            if key in committed and ts <= max(committed[key], default=0):
+                continue
+            submissions_all.append(sub)
+        if not subs["hasNext"]:
             break
+        offset += 20
 
-    submissions = fetch_submissions()
-    submissions = [s for s in submissions if int(s["timestamp"]) > last_ts]
-
-    # sort by oldest first
-    submissions.sort(key=lambda x: int(x["timestamp"]))
-
-    parent_sha = repo.get_branch(repo.default_branch).commit.sha
-    base_tree = repo.get_git_commit(parent_sha).tree
+    print(f"Total accepted submissions found: {len(submissions_all)}")
 
     elements = []
-    solution_count = {}  # track solution_1.py, solution_2.py per problem
+    solution_count = {}
 
-    for sub in submissions:
-        problem_name = normalize_name(sub["title"])
-        folder = f"{problem_name}"
+    for sub in submissions_all:
+        problem = normalize_name(sub["title"])
+        lang = sub["lang"]
+        key = problem + "_" + lang
 
-        # solution count
-        solution_count.setdefault(problem_name, 0)
-        solution_count[problem_name] += 1
-        sol_num = solution_count[problem_name]
+        code, runtime_perc, memory_perc = fetch_submission_code(sub["id"])
+        content_md = fetch_question_content(sub["titleSlug"])
+        folder_name = problem
 
-        # fetch code & question content
-        try:
-            code = fetch_code(sub["id"])
-            question_content = fetch_question(sub["titleSlug"])
-        except Exception as e:
-            print(f"⚠️ Skipping submission {sub['id']} – {e}")
-            continue
+        if key not in solution_count:
+            solution_count[key] = 1
+        else:
+            solution_count[key] += 1
 
-        readme_path = f"{folder}/README.md"
-        solution_path = f"{folder}/solution_{sol_num}.{LANG_EXT.get(sub['lang'].lower(),'txt')}"
+        solution_filename = f"solution_{solution_count[key]}.{LANG_EXT.get(lang, 'txt')}"
+        readme_path = f"{folder_name}/README.md"
+        solution_path = f"{folder_name}/{solution_filename}"
 
-        elements.append(
-            InputGitTreeElement(readme_path, "100644", "blob", f"{question_content}\nProblem slug: {sub['titleSlug']}"))
-        elements.append(
-            InputGitTreeElement(solution_path, "100644", "blob", code+"\n"))
+        # Create tree elements
+        elements.append(InputGitTreeElement(readme_path, "100644", "blob", content_md))
+        elements.append(InputGitTreeElement(solution_path, "100644", "blob", code))
 
-        commit_message = f"Time: {sub['runtime']} ({sub['runtime']}ms), Space: {sub['memory']} ({sub['memory']}MB)"
+        # Commit message
+        msg = f"{sub['title']} - Runtime {sub['runtime']} ({runtime_perc}%), Memory {sub['memory']} ({memory_perc}%)"
 
-        # create tree and commit
-        new_tree = repo.create_git_tree(elements, base_tree)
-        parent_commit = repo.get_git_commit(parent_sha)
-        commit = repo.create_git_commit(commit_message, new_tree, [parent_commit])
-        repo.get_git_ref(f"heads/{repo.default_branch}").edit(commit.sha)
+        # Create tree & commit
+        tree = repo.create_git_tree(elements, base_tree_sha)
+        commit = repo.create_git_commit(msg, tree, [repo.get_commit(parent_commit)])
+        repo.get_git_ref(f"heads/{default_branch}").edit(commit.sha)
 
-        # update parent_sha and base_tree for next commit
-        parent_sha = commit.sha
-        base_tree = new_tree.sha
-        elements = []  # clear elements for next commit
+        base_tree_sha = tree.sha
+        parent_commit = commit.sha
 
-        print(f"✅ Committed {folder}/solution_{sol_num}")
+        print(f"✅ Committed {folder_name}/{solution_filename}")
+
+        if key not in committed:
+            committed[key] = set()
+        committed[key].add(sub["timestamp"])
 
 if __name__ == "__main__":
     main()
