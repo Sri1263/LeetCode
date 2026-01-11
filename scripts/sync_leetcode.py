@@ -117,6 +117,8 @@ def get_problem_metadata(titleSlug):
         return q["questionId"], q["content"]
     return None, None
 
+from github import InputGitTreeElement
+
 def commit_solution(repo, submission, problem_content, solution_idx):
     lang = submission["lang"]
     if lang not in LANG_TO_EXTENSION:
@@ -124,10 +126,6 @@ def commit_solution(repo, submission, problem_content, solution_idx):
         return
 
     qid, _ = get_problem_metadata(submission["titleSlug"])
-    if not qid:
-        log(f"Skipping {submission['title']} due to missing questionId")
-        return
-
     folder_name = f"{pad(qid)}_{normalize_name(submission['title'])}"
     solution_file = f"solution_{solution_idx}.{LANG_TO_EXTENSION[lang]}"
     readme_file = "README.md"
@@ -137,22 +135,25 @@ def commit_solution(repo, submission, problem_content, solution_idx):
         InputGitTreeElement(f"{folder_name}/{solution_file}", "100644", "blob", submission.get("code", "")),
     ]
 
-    # Get latest commit and base tree
+    # Latest commit
     latest_commit = repo.get_branch(repo.default_branch).commit
-    base_tree = latest_commit.commit.tree  # <--- Pass GitTree object, not SHA
+    base_tree = latest_commit.commit.tree  # GitTree object
 
     # Create tree
     new_tree = repo.create_git_tree(elements, base_tree)
 
-    # Create commit
+    # Get GitCommit object
+    git_commit = repo.get_git_commit(latest_commit.sha)
+
+    # Commit
     commit_message = f"Runtime: {submission['runtime']}, Memory: {submission['memory']}"
-    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit])
+    new_commit = repo.create_git_commit(commit_message, new_tree, [git_commit])
 
     # Update branch
     repo.get_git_ref(f"heads/{repo.default_branch}").edit(new_commit.sha)
 
     log(f"✅ Committed {folder_name}/{solution_file}")
-
+    
 def main():
     g = Github(GITHUB_TOKEN)
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
