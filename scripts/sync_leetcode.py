@@ -1,27 +1,25 @@
 import os
 import requests
-import base64
-import time
-from github import Github, InputGitTreeElement, Auth
+import json
+import math
+from github import Github, InputGitTreeElement
 
-# ------------------ CONFIG ------------------
+# ---------------- CONFIG ---------------- #
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
+LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 REPO_OWNER = os.environ["REPO_OWNER"]
 REPO_NAME = os.environ["REPO_NAME"]
-LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
-LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
 
-# Folder prefix
-DEST_FOLDER = ""
-COMMIT_MESSAGE_PREFIX = "LeetCode Sync"
+DEST_FOLDER = ""  # Can set to "LeetCode/" or leave empty
+COMMIT_MESSAGE_PREFIX = "Sync LeetCode submission"
 
-# Extensions mapping
 LANG_TO_EXT = {
-    "cpp": "cpp",
-    "java": "java",
     "python3": "py",
     "python": "py",
+    "cpp": "cpp",
     "c": "c",
+    "java": "java",
     "csharp": "cs",
     "javascript": "js",
     "typescript": "ts",
@@ -30,191 +28,175 @@ LANG_TO_EXT = {
     "swift": "swift",
     "kotlin": "kt",
     "php": "php",
-    "rust": "rs",
-    # Add more if needed
 }
 
-
-# ------------------ HELPERS ------------------
+# ---------------- HELPERS ---------------- #
 def pad(n):
-    return str(n).zfill(4)
+    s = "0000" + str(n)
+    return s[-4:]
 
 
 def normalize_name(name):
     return (
-        name.lower().replace(" ", "_").replace("-", "_").replace(".", "").replace(",", "")
+        name.lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+        .replace(".", "")
+        .replace("/", "_")
     )
 
 
 def graphql_headers():
     return {
         "content-type": "application/json",
-        "cookie": f"LEETCODE_SESSION={LEETCODE_SESSION}; csrftoken={LEETCODE_CSRF}",
+        "origin": "https://leetcode.com",
+        "referer": "https://leetcode.com",
+        "cookie": f"csrftoken={LEETCODE_CSRF}; LEETCODE_SESSION={LEETCODE_SESSION};",
         "x-csrftoken": LEETCODE_CSRF,
     }
 
 
-def get_submissions():
-    """Fetch all accepted submissions."""
-    submissions = []
-    offset = 0
-    limit = 20
-
-    while True:
-        query = {
-            "query": """
-            query submissionList($offset: Int!, $limit: Int!) {
-              submissionList(offset: $offset, limit: $limit) {
-                hasNext
-                submissions {
-                  id
-                  title
-                  titleSlug
-                  timestamp
-                  statusDisplay
-                  lang
-                }
-              }
-            }
-            """,
-            "variables": {"offset": offset, "limit": limit},
+# ---------------- FETCH SUBMISSIONS ---------------- #
+def get_submissions(offset=0, limit=50):
+    query = """
+    query submissionList($offset: Int!, $limit: Int!) {
+      submissionList(offset: $offset, limit: $limit) {
+        submissions {
+          id
+          title
+          titleSlug
+          lang
+          timestamp
+          runtime
+          memory
         }
+      }
+    }"""
+    variables = {"offset": offset, "limit": limit}
 
-        resp = requests.post(
-            "https://leetcode.com/graphql/", json=query, headers=graphql_headers()
-        )
-        data = resp.json()
-        subs = data.get("data", {}).get("submissionList", {}).get("submissions", [])
-        if not subs:
-            break
-
-        for s in subs:
-            if s["statusDisplay"] == "Accepted":
-                submissions.append(s)
-
-        if not data.get("data", {}).get("submissionList", {}).get("hasNext", False):
-            break
-        offset += limit
-
-    print(f"[LeetCode Sync] Total accepted submissions found: {len(submissions)}")
-    return submissions
+    response = requests.post(
+        "https://leetcode.com/graphql/",
+        headers=graphql_headers(),
+        data=json.dumps({"query": query, "variables": variables}),
+    )
+    data = response.json()
+    if "data" not in data:
+        print("[LeetCode Sync] ❌ Failed to fetch submissions", data)
+        return []
+    return data["data"]["submissionList"]["submissions"]
 
 
+# ---------------- FETCH SUBMISSION INFO ---------------- #
 def get_submission_info(submission_id):
-    """Fetch detailed info for a submission"""
-    query = {
-        "query": """
-        query submissionDetails($submissionId: Int!) {
-          submissionDetails(submissionId: $submissionId) {
-            code
-            runtime
-            memory
-            runtimePercentile
-            memoryPercentile
-            question {
-              questionId
-              titleSlug
-            }
-          }
+    query = """
+    query submissionDetails($submissionId: Int!) {
+      submissionDetails(submissionId: $submissionId) {
+        runtime
+        memory
+        code
+        question {
+          questionId
         }
-        """,
-        "variables": {"submissionId": submission_id},
-    }
+      }
+    }"""
+    variables = {"submissionId": submission_id}
 
-    resp = requests.post(
-        "https://leetcode.com/graphql/", json=query, headers=graphql_headers()
+    response = requests.post(
+        "https://leetcode.com/graphql/",
+        headers=graphql_headers(),
+        data=json.dumps({"query": query, "variables": variables}),
     )
-    data = resp.json()
-    details = data.get("data", {}).get("submissionDetails")
-    if not details or not details.get("question"):
-        print(f"[LeetCode Sync] Skipping submission {submission_id} (locked or unavailable)")
+    data = response.json()
+    if "data" not in data or data["data"]["submissionDetails"] is None:
         return None
-
+    sub = data["data"]["submissionDetails"]
+    questionId = sub.get("question", {}).get("questionId", 0)
     return {
-        "code": details["code"],
-        "runtime": details["runtime"],
-        "memory": details["memory"],
-        "runtimePerc": details.get("runtimePercentile"),
-        "memoryPerc": details.get("memoryPercentile"),
-        "questionId": details["question"]["questionId"],
-        "titleSlug": details["question"]["titleSlug"],
+        "runtime": sub.get("runtime", 0),
+        "memory": sub.get("memory", 0),
+        "code": sub.get("code", ""),
+        "questionId": questionId,
     }
 
 
+# ---------------- FETCH QUESTION CONTENT ---------------- #
 def get_question_content(title_slug):
-    """Fetch problem description"""
-    query = {
-        "query": """
-        query getQuestionDetail($titleSlug: String!) {
-          question(titleSlug: $titleSlug) {
-            content
-          }
-        }
-        """,
-        "variables": {"titleSlug": title_slug},
-    }
+    query = """
+    query getQuestionDetail($titleSlug: String!) {
+      question(titleSlug: $titleSlug) {
+        content
+      }
+    }"""
+    variables = {"titleSlug": title_slug}
 
-    resp = requests.post(
-        "https://leetcode.com/graphql/", json=query, headers=graphql_headers()
+    response = requests.post(
+        "https://leetcode.com/graphql/",
+        headers=graphql_headers(),
+        data=json.dumps({"query": query, "variables": variables}),
     )
-    data = resp.json()
-    content = data.get("data", {}).get("question", {}).get("content")
-    if not content:
-        print(f"[LeetCode Sync] Skipping locked problem {title_slug}")
+    data = response.json()
+    if "data" not in data or data["data"]["question"] is None:
         return None
-    return content
+    return data["data"]["question"]["content"]
 
 
-# ------------------ MAIN SYNC ------------------
-from github import Github, InputGitTreeElement, Auth
+# ---------------- COMMIT LOGIC ---------------- #
+def commit_solution(repo, sub, problem_content, solution_index):
+    folder_name = f"{pad(sub['question']['questionId'])}_{normalize_name(sub['title'])}"
+    readme_path = f"{DEST_FOLDER}{folder_name}/README.md"
+    solution_file = f"{DEST_FOLDER}{folder_name}/solution_{solution_index}.{LANG_TO_EXT.get(sub['lang'], 'txt')}"
 
-def main():
-    # Use Auth.Token to fix deprecation warning
-    g = Github(auth=Auth.Token(GITHUB_TOKEN))
+    elements = [
+        InputGitTreeElement(readme_path, "100644", "blob", problem_content),
+        InputGitTreeElement(solution_file, "100644", "blob", sub["code"]),
+    ]
+
+    # Create tree
+    new_tree = repo.create_git_tree(elements, base_tree)
+
+    commit_message = f"{COMMIT_MESSAGE_PREFIX} - Runtime: {sub['runtime']} ms, Memory: {sub['memory']} MB"
+
+    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit])
+
+    repo.get_git_ref(f"heads/{default_branch}").edit(new_commit.sha)
+
+    # Update parent tree/commit for next iteration
+    global latest_commit, base_tree
+    latest_commit = new_commit
+    base_tree = new_tree
+
+    print(f"[LeetCode Sync] ✅ Committed {folder_name}/solution_{solution_index}")
+
+
+# ---------------- MAIN ---------------- #
+if __name__ == "__main__":
+    print("[LeetCode Sync] Fetching submissions...")
+
+    g = Github(GITHUB_TOKEN)  # Works without deprecation warning
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
-    submissions = get_submissions()
-    solution_count = {}
-
-    # Get latest commit & its tree object (GitTree)
     default_branch = repo.default_branch
     latest_commit = repo.get_branch(default_branch).commit
-    base_tree = latest_commit.commit.tree  # <-- use tree object, not SHA
+    base_tree = latest_commit.commit.tree
+
+    submissions = get_submissions()
+    print(f"[LeetCode Sync] Total accepted submissions found: {len(submissions)}")
+
+    solution_count = {}
 
     for sub in submissions:
         info = get_submission_info(sub["id"])
         if info is None:
             continue
+        sub.update(info)
 
-        content = get_question_content(info["titleSlug"])
+        content = get_question_content(sub["titleSlug"])
         if content is None:
             continue
 
-        folder_name = f"{pad(info['questionId'])}_{normalize_name(sub['title'])}"
-        solution_count[folder_name] = solution_count.get(folder_name, 0) + 1
-        sol_index = solution_count[folder_name]
+        qid = sub["questionId"]
+        sub["question"] = {"questionId": qid}
 
-        readme_path = f"{DEST_FOLDER}{folder_name}/README.md"
-        solution_file = f"{DEST_FOLDER}{folder_name}/solution_{sol_index}.{LANG_TO_EXT.get(sub['lang'], 'txt')}"
-
-        elements = [
-            InputGitTreeElement(readme_path, "100644", "blob", content),
-            InputGitTreeElement(solution_file, "100644", "blob", info["code"]),
-        ]
-
-        # Pass GitTree object, not SHA
-        new_tree = repo.create_git_tree(elements, base_tree)
-
-        commit_message = f"{COMMIT_MESSAGE_PREFIX} - Runtime: {info['runtime']} ms, Memory: {info['memory']} MB"
-        new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit.commit])
-
-        repo.get_git_ref(f"heads/{default_branch}").edit(new_commit.sha)
-
-        # Update latest commit & tree for next iteration
-        latest_commit = new_commit
-        base_tree = new_tree
-
-        print(f"[LeetCode Sync] ✅ Committed {folder_name}/solution_{sol_index}")
-
-if __name__ == "__main__":
-    main()
+        key = f"{pad(qid)}_{normalize_name(sub['title'])}"
+        solution_count[key] = solution_count.get(key, 0) + 1
+        commit_solution(repo, sub, content, solution_count[key])
