@@ -44,42 +44,43 @@ def graphql_headers(session, csrf):
 
 # ------------------ GET SUBMISSIONS ------------------
 def get_submissions():
-    log("Fetching submissions...")
-    url = BASE_URL + "/graphql/"
-    query = """
-    query ($offset: Int!, $limit: Int!) {
-      submissionList(offset: $offset, limit: $limit) {
-        hasNext
-        submissions {
-          id
-          title
-          titleSlug
-          lang
-          statusDisplay
-          runtime
-          memory
-          timestamp
-          question {
-            questionId
-          }
-        }
-      }
+    url = "https://leetcode.com/graphql/"
+    headers = {
+        "content-type": "application/json",
+        "cookie": f"LEETCODE_SESSION={LEETCODE_SESSION}; csrftoken={LEETCODE_CSRF};",
+        "x-csrftoken": LEETCODE_CSRF,
     }
-    """
-    offset = 0
-    submissions = []
-    while True:
-        resp = requests.post(url, headers=graphql_headers(LEETCODE_SESSION, LEETCODE_CSRF),
-                             json={"query": query, "variables": {"offset": offset, "limit": 20}})
-        data = resp.json()
-        for sub in data["data"]["submissionList"]["submissions"]:
-            if sub["statusDisplay"] == "Accepted":
-                submissions.append(sub)
-        if not data["data"]["submissionList"]["hasNext"]:
-            break
-        offset += 20
-    log(f"Total accepted submissions found: {len(submissions)}")
-    return submissions
+    query = {
+        "query": """
+        query getSubmissionList($offset: Int!, $limit: Int!) {
+            submissionList(offset: $offset, limit: $limit) {
+                submissions {
+                    id
+                    title
+                    titleSlug
+                    lang
+                    timestamp
+                    statusDisplay
+                    runtime
+                    memory
+                }
+            }
+        }
+        """,
+        "variables": {"offset": 0, "limit": 50},
+    }
+
+    try:
+        response = requests.post(url, json=query, headers=headers)
+        result = response.json()
+        if "data" not in result or "submissionList" not in result["data"]:
+            print("[LeetCode Sync] Error: Unexpected response from LeetCode API")
+            print(result)
+            return []
+        return result["data"]["submissionList"]["submissions"]
+    except Exception as e:
+        print(f"[LeetCode Sync] Exception while fetching submissions: {e}")
+        return []
 
 # ------------------ GET PROBLEM CONTENT ------------------
 def get_problem_content(title_slug):
