@@ -2,7 +2,7 @@ import os
 import requests
 import json
 import math
-from github import Github, InputGitTreeElement
+from github import Github, InputGitTreeElement, Auth
 
 # ---------------- CONFIG ---------------- #
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
@@ -173,7 +173,7 @@ def commit_solution(repo, sub, problem_content, solution_index):
 if __name__ == "__main__":
     print("[LeetCode Sync] Fetching submissions...")
 
-    g = Github(GITHUB_TOKEN)  # Works without deprecation warning
+    g = Github(auth=Auth.Token(GITHUB_TOKEN))  # Works without deprecation warning
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
     default_branch = repo.default_branch
