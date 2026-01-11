@@ -1,90 +1,121 @@
 import os
 import requests
-from github import Github, InputGitTreeElement
-import time
+import json
+import re
+from github import Github, InputGitTreeElement, Auth
 
-# --- CONFIG ---
+# ------------------ CONFIG ------------------
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-LEETCODE_USERNAME = os.environ.get("LEETCODE_USERNAME")
+LEETCODE_USERNAME = os.environ.get("LEETCODE_USERNAME", "")
 LEETCODE_CSRF = os.environ["LEETCODE_CSRF"]
 LEETCODE_SESSION = os.environ["LEETCODE_SESSION"]
 REPO_OWNER = os.environ["REPO_OWNER"]
 REPO_NAME = os.environ["REPO_NAME"]
 
-GRAPHQL_URL = "https://leetcode.com/graphql/"
-HEADERS = {
-    "Content-Type": "application/json",
-    "x-csrftoken": LEETCODE_CSRF,
-    "cookie": f"LEETCODE_SESSION={LEETCODE_SESSION}; csrftoken={LEETCODE_CSRF}"
+# ------------------ GRAPHQL QUERY ------------------
+SUBMISSIONS_QUERY = """
+query recentAcSubmissions($username: String!) {
+  recentAcSubmissionList(username: $username, limit: 100) {
+    id
+    title
+    titleSlug
+    lang
+    code
+    timestamp
+    statusDisplay
+    memory
+    runtime
+  }
 }
+"""
 
-# --- FETCH SUBMISSIONS ---
+# ------------------ FUNCTIONS ------------------
 def get_submissions(username):
-    query = """
-    query recentAcSubmissions($username: String!) {
-      submissionList(username: $username) {
-        submissions {
-          id
-          title
-          titleSlug
-          lang
-          code
-          timestamp
-          runtime
-          memory
-        }
-      }
+    headers = {
+        "Content-Type": "application/json",
+        "x-csrftoken": LEETCODE_CSRF,
+        "cookie": f"LEETCODE_SESSION={LEETCODE_SESSION};csrftoken={LEETCODE_CSRF}",
+        "referer": "https://leetcode.com",
+        "origin": "https://leetcode.com",
+        "user-agent": "Mozilla/5.0",
     }
-    """
-    payload = {"query": query, "variables": {"username": username}}
-    resp = requests.post(GRAPHQL_URL, headers=HEADERS, json=payload)
+    payload = {
+        "query": SUBMISSIONS_QUERY,
+        "variables": {"username": username},
+    }
+    resp = requests.post("https://leetcode.com/graphql/", headers=headers, json=payload)
     resp.raise_for_status()
     data = resp.json()
-    if "errors" in data:
-        raise Exception(f"Error fetching submissions: {data['errors']}")
-    return data["data"]["submissionList"]["submissions"]
+    if "data" not in data or "recentAcSubmissionList" not in data["data"]:
+        print("No submissions found or invalid response")
+        return []
+    return data["data"]["recentAcSubmissionList"]
 
-# --- COMMIT LOGIC ---
-def commit_solution(repo, sub, solution_idx):
-    # Folder name: zero-padded problem number + titleSlug
-    problem_number = sub.get("id").zfill(4)
-    folder_name = f"{problem_number}_{sub['titleSlug']}"
-    file_name = f"solution_{solution_idx}.py"
-    path = f"{folder_name}/{file_name}"
+def sanitize_slug(title):
+    slug = title.lower().replace(" ", "_")
+    slug = re.sub(r"[^a-z0-9_]", "", slug)
+    return slug
 
-    # Code content
-    content = sub["code"]
-    if not content.strip():
-        print(f"Skipping empty solution for {folder_name}")
+def format_folder_name(index, slug):
+    return f"{str(index).zfill(4)}_{slug}"
+
+def commit_solution(repo, submission, folder_index):
+    title_slug = sanitize_slug(submission["titleSlug"])
+    folder_name = format_folder_name(folder_index, title_slug)
+
+    # Only keep file extension for Python
+    lang_ext = {
+        "python3": "py",
+        "cpp": "cpp",
+        "java": "java",
+        "c": "c",
+    }
+    ext = lang_ext.get(submission["lang"].lower(), "txt")
+    solution_files = [f"solution_1.{ext}"]  # can extend to multiple solutions if needed
+
+    # Prepare tree elements
+    elements = []
+    readme_content = f"# {submission['title']}\nProblem slug: {submission['titleSlug']}\n"
+    elements.append(InputGitTreeElement(f"{folder_name}/README.md", "100644", "blob", readme_content))
+
+    code_content = submission["code"]
+    if not code_content.strip():
+        print(f"Skipping empty code for {submission['title']}")
         return
 
-    # Prepare tree element
-    element = InputGitTreeElement(path, "100644", "blob", content)
-    
-    # Latest commit & tree
-    latest_commit = repo.get_branch(repo.default_branch).commit
-    base_tree = latest_commit.commit.tree
+    elements.append(InputGitTreeElement(f"{folder_name}/{solution_files[0]}", "100644", "blob", code_content))
 
-    new_tree = repo.create_git_tree([element], base_tree)
-    commit_message = f"Runtime: {sub['runtime']} ms, Memory: {sub['memory']} MB"
-    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit.commit])
-    repo.get_git_ref(f"heads/{repo.default_branch}").edit(new_commit.sha)
-    print(f"✅ Committed {path}")
+    # Get default branch and latest commit
+    ref = repo.get_git_ref(f"heads/{repo.default_branch}")
+    latest_commit = repo.get_git_commit(ref.object.sha)
+    base_tree = latest_commit.tree
 
-# --- MAIN ---
+    # Create new tree and commit
+    new_tree = repo.create_git_tree(elements, base_tree)
+    commit_message = f"Runtime: {submission['runtime']}, Memory: {submission['memory']}"
+    new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit])
+
+    # Update branch ref
+    try:
+        ref.edit(new_commit.sha)
+    except Exception as e:
+        print("Fast-forward failed, skipping update:", e)
+        return
+
+    print(f"✅ Committed {folder_name}/{solution_files[0]}")
+
+# ------------------ MAIN ------------------
 def main():
-    g = Github(GITHUB_TOKEN)
+    submissions = get_submissions(LEETCODE_USERNAME)
+    if not submissions:
+        print("No accepted submissions found.")
+        return
+
+    g = Github(auth=Auth.Token(GITHUB_TOKEN))
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
-    submissions = get_submissions(LEETCODE_USERNAME)
-    
-    # Count solutions per problem
-    solution_count = {}
-    for sub in submissions:
-        slug = sub['titleSlug']
-        solution_count[slug] = solution_count.get(slug, 0) + 1
-        commit_solution(repo, sub, solution_count[slug])
-        time.sleep(1)  # avoid API rate limits
+    for idx, sub in enumerate(submissions, start=1):
+        commit_solution(repo, sub, idx)
 
 if __name__ == "__main__":
     main()
