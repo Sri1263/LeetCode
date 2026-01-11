@@ -141,7 +141,7 @@ def commit_solution(repo, submission, problem_content, solution_index):
 
 # ------------------ MAIN ------------------
 def main():
-    g = Github(auth=GITHUB_TOKEN)  # fixes deprecation warning
+    g = Github(auth=Auth.Token(GITHUB_TOKEN))  # fixes deprecation warning
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
     submissions = get_submissions()
