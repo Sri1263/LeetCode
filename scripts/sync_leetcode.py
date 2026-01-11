@@ -2,7 +2,7 @@ import os
 import requests
 import base64
 import time
-from github import Github, InputGitTreeElement
+from github import Github, InputGitTreeElement, Auth
 
 # ------------------ CONFIG ------------------
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
@@ -166,17 +166,20 @@ def get_question_content(title_slug):
 
 
 # ------------------ MAIN SYNC ------------------
+from github import Github, InputGitTreeElement, Auth
+
 def main():
-    g = Github(GITHUB_TOKEN)
+    # Use Auth.Token to fix deprecation warning
+    g = Github(auth=Auth.Token(GITHUB_TOKEN))
     repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
 
     submissions = get_submissions()
     solution_count = {}
 
-    # Get latest commit SHA & tree SHA
+    # Get latest commit & its tree object (GitTree)
     default_branch = repo.default_branch
     latest_commit = repo.get_branch(default_branch).commit
-    base_tree_sha = latest_commit.commit.tree.sha
+    base_tree = latest_commit.commit.tree  # <-- use tree object, not SHA
 
     for sub in submissions:
         info = get_submission_info(sub["id"])
@@ -187,34 +190,31 @@ def main():
         if content is None:
             continue
 
-        # Folder: 0009_palindrome_number
         folder_name = f"{pad(info['questionId'])}_{normalize_name(sub['title'])}"
-
-        # Count solutions per problem
         solution_count[folder_name] = solution_count.get(folder_name, 0) + 1
         sol_index = solution_count[folder_name]
 
         readme_path = f"{DEST_FOLDER}{folder_name}/README.md"
         solution_file = f"{DEST_FOLDER}{folder_name}/solution_{sol_index}.{LANG_TO_EXT.get(sub['lang'], 'txt')}"
 
-        # Prepare tree elements
         elements = [
             InputGitTreeElement(readme_path, "100644", "blob", content),
             InputGitTreeElement(solution_file, "100644", "blob", info["code"]),
         ]
 
-        # Create tree & commit
-        new_tree = repo.create_git_tree(elements, base_tree_sha)
+        # Pass GitTree object, not SHA
+        new_tree = repo.create_git_tree(elements, base_tree)
+
         commit_message = f"{COMMIT_MESSAGE_PREFIX} - Runtime: {info['runtime']} ms, Memory: {info['memory']} MB"
         new_commit = repo.create_git_commit(commit_message, new_tree, [latest_commit.commit])
+
         repo.get_git_ref(f"heads/{default_branch}").edit(new_commit.sha)
 
-        # Update base tree & commit for next iteration
-        base_tree_sha = new_tree.sha
+        # Update latest commit & tree for next iteration
         latest_commit = new_commit
+        base_tree = new_tree
 
         print(f"[LeetCode Sync] ✅ Committed {folder_name}/solution_{sol_index}")
-
 
 if __name__ == "__main__":
     main()
