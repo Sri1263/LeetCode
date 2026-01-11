@@ -155,7 +155,12 @@ def main():
         elements.append(InputGitTreeElement(solution_path, "100644", "blob", code))
 
         # Create commit
-        tree = repo.create_git_tree(elements, None)  # <--- PASS None to avoid AssertionError
+        # Get latest commit and tree from default branch
+        default_branch = repo.get_branch(repo.default_branch)
+        latest_commit = repo.get_git_commit(default_branch.commit.sha)
+        base_tree_sha = latest_commit.tree.sha
+        
+        tree = repo.create_git_tree(elements, base_tree_sha)
         parent = repo.get_git_commit(latest_commit_sha)
         commit = repo.create_git_commit(commit_msg, tree, [parent])
         repo.get_git_ref(f"heads/{repo.default_branch}").edit(commit.sha)
